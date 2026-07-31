@@ -178,7 +178,7 @@ app.post("/orders", authenticateToken, async(req, res) => {
                     db.query(itemSql, [orderId, product_id, quantity, price_at_purchase, subtotal], (err, r) => {if (err) reject(err); else resolve(r);});
                 });
                 await new Promise((resolve, reject) => {
-                    const stockSql = "UPDATE products SET stock_quantity = stock_quantity >= ?";
+                    const stockSql = "UPDATE products SET stock_quantity = stock_quantity - ? WHERE id = ? AND stock_quantity >= ?";
                     db.query(stockSql, [quantity, product_id, quantity], (err, r) => {
                         if (err) reject(err);
                         else if (r.affectedRows === 0) reject(new Error("insufficient stock"));
@@ -207,15 +207,79 @@ app.post("/orders", authenticateToken, async(req, res) => {
                 } catch (mongoErr) {
                     console.error("mongodb log failed:", mongoErr.message);
                 }
-                res.status(201).json({ message: "order place", orderId});
+                res.status(201).json({ message: "order placed", orderId});
             });
         } catch (err) {
             // step 6: rollBack on any error
-            db.rollBack(() => {
+            db.rollback(() => {
                 res.status(400).json({ message: err.message || "order failed"});
             });
         }
     });
+});
+
+// GET/orders
+app.get("/orders", authenticateToken, (req, res) => {
+    let sql;
+    let params;
+    if (req.user.role === "admin") {
+        sql = "SELECT o.id, o.status, o.total_amount, o.created_at, u.first_name, u.last_name, u.email FROM orders o INNER JOIN users u ON o.user_id = u.id ORDER BY o.created_at DESC";
+        params = [];
+    } else {
+        sql = "SELECT id, status, total_amount, created_at FROM orders WHERE user_id = ? ORDER BY created_at DESC";
+        params = [req.user.id];
+    }
+    db.query(sql, params, (err, results) => {
+        if (err) return res.status(500).json({ message: "server error"});
+        res.json(results);
+    });
+});
+
+// GET/ orders/my-current user orders
+app.get("/orders/my", authenticateToken, (req, res) => {
+    const sql = "SELECT id ,status, total_amount, created_at FROM orders WHERE user_id = ? ORDER BY created_at DESC";
+    db.query(sql, [req.user.id], (err, results) => {
+        if (err) return res.status(500).json({ message: "server error"});
+        res.json(results);
+    });
+});
+
+// GET /orders/:id - single order with items
+app.get("/orders/:id", authenticateToken, (req, res) => {
+    const {id} = req.params;
+    const sql = "SELECT o.id AS order_id, o.status, o.total_amount, o.created_at, oi.id AS item_id, oi.quantity, oi.price_at_purchase, oi.subtotal, p.name AS product_name FROM orders o INNER JOIN order_items oi ON oi.order_id = o.id INNER JOIN products p ON p.id = oi.product_id WHERE o.id = ? ORDER BY oi.id ASC";
+    db.query(sql, [id], (err, results) => {
+        if (err) return res.status(500).json({ message: "server error"});
+        if (results.length === 0) {
+            return res.status(404).json({ message: "order not found"});
+        }
+        res.json(results);
+    });
+});
+
+// POST/reviews
+app.post("/reviews", authenticateToken, async(req, res)=> {
+    const {product_id, rating, review_text} = req.body;
+    if (!product_id || !rating || !review_text) {
+        return res.status(400).json({ message: "product id, rating, and review text are required"});
+    } 
+    if (rating < 1 || rating > 5) {
+        return res.status(400).json({ message: "rating must be between 1 and 5"});
+    }
+    try {
+        const mongo = getMongo();
+        const result = await mongo.collection("product_reviews").insertOne({
+            product_id: parseInt(product_id),
+            user_id: req.user.id,
+            first_name: req.user.email.split("@")[0],
+            rating: parseInt(rating),
+            review_text,
+            created_at: new Date()
+        });
+        res.status(201).json({ message: "review submitted", reviewId: result.insertedId});
+    } catch (err) {
+        res.status(500).json({ message: "server error"});
+    }
 });
 
 // GET/categories
